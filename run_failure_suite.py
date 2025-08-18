@@ -32,7 +32,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 import json
 import random
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Optional
 from dataclasses import dataclass
 
 from polycca.simulate import PolySimConfig, generate_dataset
@@ -177,11 +177,11 @@ def experiment_E2_mi_sweep(out_dir: Path, motif_probs=None):
 
 # -------------- E3 Alignment Ablation --------------
 
-def experiment_E3_alignment_ablation(out_dir: Path, shuffle_fracs=None):
+def experiment_E3_alignment_ablation(out_dir: Path, shuffle_fracs=None, motif_prob: float = 0.5):
     if shuffle_fracs is None:
         shuffle_fracs = [0.0,0.1,0.25,0.5,0.75,1.0]
-    # generate moderately dependent dataset
-    rows = generate_mi_level_dataset(150,120,'TATA',['dummy'])[0]
+    # base moderately dependent dataset at provided motif_prob
+    rows = generate_mi_level_dataset(150,120,'TATA',[motif_prob])[0]
     y = np.array([r[0] for r in rows]); seqs=[r[1] for r in rows]
     base_view = build_poly_view(seqs)
     results=[]
@@ -217,10 +217,11 @@ def experiment_E3_alignment_ablation(out_dir: Path, shuffle_fracs=None):
 
 # -------------- E4 SNR Sweep --------------
 
-def experiment_E4_snr_sweep(out_dir: Path, noise_levels=None):
+def experiment_E4_snr_sweep(out_dir: Path, noise_levels=None, motif_prob: float = 0.5):
     if noise_levels is None:
         noise_levels = [0.0,0.02,0.05,0.1,0.15,0.2,0.3]
-    rows = generate_mi_level_dataset(150,120,'TATA',['dummy'])[0]
+    # start from the same moderately dependent base dataset as E3 (motif prob given)
+    rows = generate_mi_level_dataset(150,120,'TATA',[motif_prob])[0]
     y = np.array([r[0] for r in rows]); seqs=[r[1] for r in rows]
     view1 = build_poly_view(seqs)
     rhos=[]; f1s=[]
@@ -249,10 +250,11 @@ def experiment_E4_snr_sweep(out_dir: Path, noise_levels=None):
 
 # -------------- E5 Learning Curves --------------
 
-def experiment_E5_learning_curve(out_dir: Path, fractions=None):
+def experiment_E5_learning_curve(out_dir: Path, fractions=None, motif_prob: float = 0.5):
     if fractions is None:
         fractions = [0.1,0.2,0.3,0.5,0.7,1.0]
-    rows = generate_mi_level_dataset(300,120,'TATA',['dummy'])[0]
+    # moderately dependent dataset (motif prob supplied)
+    rows = generate_mi_level_dataset(300,120,'TATA',[motif_prob])[0]
     y = np.array([r[0] for r in rows]); seqs=[r[1] for r in rows]
     view1 = build_poly_view(seqs)
     view2 = build_poly_view(perturb_substitution(seqs,0.05))
@@ -286,24 +288,71 @@ def experiment_E5_learning_curve(out_dir: Path, fractions=None):
 
 # -------------- E6 Method Family Compare --------------
 
-def experiment_E6_method_family(out_dir: Path):
-    # reuse dataset from learning curve
-    rows = generate_mi_level_dataset(200,120,'TATA',['dummy'])[0]
-    y = np.array([r[0] for r in rows]); seqs=[r[1] for r in rows]
-    res_poly = cv_poly_cca(seqs, y, k=3, degree=2, noise_p=0.05, n_components=8, n_splits=5)
-    res_mg = cv_mg_tcca(seqs, y, k=3, degree=2, ps=(0.0,0.05,0.1), n_components=8, n_splits=5)
-    baselines = cv_kmer_baselines(seqs, y, k=3, degree=1, linear_only=True)
+def experiment_E6_method_family(out_dir: Path, motif_probs: Optional[List[float]] = None, n_per_class: int = 200):
+    """Compare method family trends across multiple MI (motif probability) levels.
+
+    Produces long-format DataFrame with columns: motif_prob, method, F1, rho1 (if available).
+    Also saves a multi-line plot (F1 vs motif_prob) and optionally per-method bars at mid MI.
+    """
+    if motif_probs is None:
+        motif_probs = [0.3,0.5,0.7]
     records=[]
-    for r in [res_poly, res_mg, *baselines]:
-        records.append({'method':r.name,'F1':r.mean_f1_macro,'rho1':r.extra.get('mean_correlations') if r.extra else np.nan})
+    for mp in motif_probs:
+        rows = generate_mi_level_dataset(n_per_class,120,'TATA',[mp])[0]
+        y = np.array([r[0] for r in rows]); seqs=[r[1] for r in rows]
+        # Poly-CCA
+        res_poly = cv_poly_cca(seqs, y, k=3, degree=2, noise_p=0.05, n_components=8, n_splits=5)
+        # MG-TCCA (use small set of ps as before)
+        res_mg = cv_mg_tcca(seqs, y, k=3, degree=2, ps=(0.0,0.05,0.1), n_components=8, n_splits=5)
+        # Baseline linear CCA style (k-mer logistic etc.)
+        baselines = cv_kmer_baselines(seqs, y, k=3, degree=1, linear_only=True)
+        for r in [res_poly, res_mg, *baselines]:
+            records.append({
+                'motif_prob': mp,
+                'method': r.name,
+                'F1': r.mean_f1_macro,
+                'rho1': r.extra.get('mean_correlations') if r.extra else np.nan
+            })
     df = pd.DataFrame(records)
-    plt.figure(figsize=(6,3))
-    sns.barplot(data=df, x='method', y='F1', color='steelblue')
-    plt.xticks(rotation=30, ha='right')
+    # Plot trend consistency (F1 vs motif_prob)
+    plt.figure(figsize=(6,4))
+    sns.lineplot(data=df, x='motif_prob', y='F1', hue='method', marker='o')
+    plt.title('Method family consistency across MI levels')
     plt.tight_layout()
     plt.savefig(out_dir/'Fig7_method_family_compare.png'); plt.close()
     df.to_csv(out_dir/'E6_method_family.csv', index=False)
     return df
+
+def choose_mid_motif_prob(mi_df: Optional[pd.DataFrame] = None,
+                          target_rho_range: Tuple[float,float]=(0.3,0.6),
+                          fallback: float = 0.5,
+                          out_dir: Optional[Path]=None) -> float:
+    """Select a motif probability giving moderate dependence.
+
+    If mi_df provided (from E2), pick first rho1 within range; else pick closest to range midpoint.
+    If nothing suitable, return fallback.
+    Saves a small JSON with selection rationale if out_dir given.
+    """
+    if mi_df is None or 'rho1' not in mi_df.columns:
+        return fallback
+    low, high = target_rho_range
+    midpoint = (low+high)/2
+    # ensure sorted by motif_prob for reproducibility
+    cand = mi_df.sort_values('motif_prob')
+    in_range = cand[(cand.rho1>=low) & (cand.rho1<=high)]
+    if len(in_range)>0:
+        chosen_row = in_range.iloc[0]
+    else:
+        # choose closest to midpoint
+        idx = (cand.rho1 - midpoint).abs().argmin()
+        chosen_row = cand.iloc[idx]
+    chosen = float(chosen_row.motif_prob)
+    if out_dir is not None:
+        summary = dict(chosen_motif_prob=chosen,
+                       target_rho_range=target_rho_range,
+                       chosen_rho1=float(chosen_row.rho1))
+        (out_dir/'motif_prob_selection.json').write_text(json.dumps(summary, indent=2))
+    return chosen
 
 # -------------- E7 Diagnostic Pipeline (simplified) --------------
 
@@ -388,15 +437,20 @@ def main():
     # E1
     summaries['E1'] = experiment_E1_null(PolySimConfig(n_per_class=150, length=120, seed=0), out_dir)
     # E2
-    summaries['E2'] = experiment_E2_mi_sweep(out_dir).to_dict('records') if hasattr(experiment_E2_mi_sweep(out_dir), 'to_dict') else None
+    mi_df = experiment_E2_mi_sweep(out_dir)
+    summaries['E2'] = mi_df.to_dict('records')
+    # choose mid-level motif probability for subsequent experiments
+    mid_motif_prob = choose_mid_motif_prob(mi_df, target_rho_range=(0.3,0.6), out_dir=out_dir)
     # E3
-    summaries['E3'] = experiment_E3_alignment_ablation(out_dir).to_dict('records')
+    summaries['E3'] = experiment_E3_alignment_ablation(out_dir, motif_prob=mid_motif_prob).to_dict('records')
     # E4
-    summaries['E4'] = experiment_E4_snr_sweep(out_dir).to_dict('records')
+    summaries['E4'] = experiment_E4_snr_sweep(out_dir, motif_prob=mid_motif_prob).to_dict('records')
     # E5
-    summaries['E5'] = experiment_E5_learning_curve(out_dir).to_dict('records')
+    summaries['E5'] = experiment_E5_learning_curve(out_dir, motif_prob=mid_motif_prob).to_dict('records')
     # E6
-    summaries['E6'] = experiment_E6_method_family(out_dir).to_dict('records')
+    # build a small symmetric set around selected mid MI to show trend consistency
+    e6_probs = sorted({max(0.0, mid_motif_prob-0.2), mid_motif_prob, min(1.0, mid_motif_prob+0.2)})
+    summaries['E6'] = experiment_E6_method_family(out_dir, motif_probs=e6_probs).to_dict('records')
     # E7
     summaries['E7'] = experiment_E7_pipeline(out_dir)
     # Failure map
