@@ -17,4 +17,4 @@ source /scratch/rp06/sl5952/Poly-CCA/.venv/bin/activate
 # Change to project directory
 cd ..
 
-python3 ./run_experiments.py
+python3 ./run_experiments.py >> experiment.log 2>&1
