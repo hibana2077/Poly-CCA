@@ -1,7 +1,7 @@
 #!/bin/bash
 #PBS -P rp06
 #PBS -q normal           
-#PBS -l ncpus=64
+#PBS -l ncpus=48
 #PBS -l mem=8GB
 #PBS -l walltime=05:00:00  
 #PBS -l wd                  
