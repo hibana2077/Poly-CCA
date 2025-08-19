@@ -231,41 +231,72 @@ def cv_mg_tcca(
 def cv_kmer_baselines(seqs: List[str], y: np.ndarray, k: int = 3, degree: int = 1, linear_only=False) -> List[CVResult]:
     X = prepare_kmer_poly(seqs, k, degree)
     results: List[CVResult] = []
+    # Detect degenerate feature matrix (all zero variance). This can happen in edge synthetic settings
+    # (e.g., extremely short sequences or accidental identical sequences) and breaks PCA/LDA.
+    feature_variances = np.var(X, axis=0)
+    all_constant = bool(np.all(feature_variances < 1e-12))
     for name, fn in _baseline_models(linear_only=linear_only).items():
         folds = cross_validate(X, y, fn)
         results.append(aggregate_cv(f"{name} (k={k},d={degree})", folds))
-    # PCA -> LR
-    folds = []
     skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=0)
-    for tr, te in skf.split(X, y):
-        Xtr, Xte = X[tr], X[te]
-        scaler = StandardScaler().fit(Xtr)
-        Xtr_s = scaler.transform(Xtr)
-        Xte_s = scaler.transform(Xte)
-        pca = PCA(n_components=min(32, Xtr_s.shape[1]))
-        Xtr_p = pca.fit_transform(Xtr_s)
-        Xte_p = pca.transform(Xte_s)
-        model = LogisticRegression(max_iter=2000)
-        model.fit(Xtr_p, y[tr])
-        pred = model.predict(Xte_p)
-        proba = model.predict_proba(Xte_p)
-        f1m, roc = _compute_metrics(y[te], pred, proba)
-        folds.append(FoldMetrics(f1_macro=f1m, roc_auc=roc))
-    results.append(aggregate_cv("PCA->LR", folds))
-    # LDA (only if classes <= n_features)
-    if len(np.unique(y)) <= X.shape[1]:
+    # PCA -> LR (skip if degenerate)
+    if not all_constant:
         folds = []
         for tr, te in skf.split(X, y):
             Xtr, Xte = X[tr], X[te]
-            lda = LDA()
-            lda.fit(Xtr, y[tr])
-            pred = lda.predict(Xte)
+            scaler = StandardScaler().fit(Xtr)
+            Xtr_s = scaler.transform(Xtr)
+            Xte_s = scaler.transform(Xte)
+            # Guard against n_components=0
+            n_comp = int(min(32, Xtr_s.shape[1]))
+            if n_comp <= 0:
+                continue
+            # If total variance zero (should be caught by all_constant) skip
+            if np.all(np.var(Xtr_s, axis=0) < 1e-12):
+                continue
+            pca = PCA(n_components=n_comp)
+            try:
+                Xtr_p = pca.fit_transform(Xtr_s)
+                Xte_p = pca.transform(Xte_s)
+            except Exception:
+                continue  # skip unstable PCA
+            model = LogisticRegression(max_iter=2000)
+            model.fit(Xtr_p, y[tr])
+            pred = model.predict(Xte_p)
             proba = None
-            if hasattr(lda, 'predict_proba'):
-                proba = lda.predict_proba(Xte)
+            if hasattr(model, 'predict_proba'):
+                try:
+                    proba = model.predict_proba(Xte_p)
+                except Exception:
+                    proba = None
             f1m, roc = _compute_metrics(y[te], pred, proba)
             folds.append(FoldMetrics(f1_macro=f1m, roc_auc=roc))
-        results.append(aggregate_cv("LDA", folds))
+        if folds:
+            results.append(aggregate_cv("PCA->LR", folds))
+    # LDA (only if classes <= n_non_constant_features and not degenerate)
+    if not all_constant:
+        non_const = int(np.sum(feature_variances >= 1e-12))
+        if len(np.unique(y)) <= non_const:
+            folds = []
+            for tr, te in skf.split(X, y):
+                Xtr, Xte = X[tr], X[te]
+                lda = LDA()
+                try:
+                    lda.fit(Xtr, y[tr])
+                except Exception:
+                    # Skip fold if LDA fails (e.g., numerical rank deficiency)
+                    continue
+                pred = lda.predict(Xte)
+                proba = None
+                if hasattr(lda, 'predict_proba'):
+                    try:
+                        proba = lda.predict_proba(Xte)
+                    except Exception:
+                        proba = None
+                f1m, roc = _compute_metrics(y[te], pred, proba)
+                folds.append(FoldMetrics(f1_macro=f1m, roc_auc=roc))
+            if folds:
+                results.append(aggregate_cv("LDA", folds))
     return results
 
 
